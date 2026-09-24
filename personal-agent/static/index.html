@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal Agent</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --text:#e6e6e6; --muted:#8a8f98; --accent:#4f8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:0; border-bottom:1px solid #262a33; }
+  .tab { padding:12px 20px; cursor:pointer; color:var(--muted); }
+  .tab.active { color:var(--text); border-bottom:2px solid var(--accent); }
+  .view { flex:1; display:none; overflow:auto; padding:20px; }
+  .view.active { display:flex; flex-direction:column; }
+
+  /* chat */
+  #messages { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:10px; max-width:700px; margin:0 auto; width:100%; }
+  .msg { padding:10px 14px; border-radius:10px; max-width:80%; white-space:pre-wrap; }
+  .msg.user { align-self:flex-end; background:var(--accent); }
+  .msg.assistant { align-self:flex-start; background:var(--panel); }
+  #chat-form { display:flex; gap:8px; max-width:700px; margin:16px auto 0; width:100%; }
+  input, button, textarea { font:inherit; }
+  #chat-input { flex:1; padding:10px 12px; border-radius:8px; border:1px solid #333; background:var(--panel); color:var(--text); }
+  button { padding:10px 16px; border-radius:8px; border:none; background:var(--accent); color:white; cursor:pointer; }
+
+  /* bills */
+  .bills-form { display:flex; gap:10px; flex-wrap:nowrap; align-items:end; max-width:900px; overflow-x:auto; }
+  .field { display:flex; flex-direction:column; gap:4px; flex-shrink:0; }
+  .field label { font-size:12px; color:var(--muted); }
+  .field input { padding:8px 10px; border-radius:6px; border:1px solid #333; background:var(--panel); color:var(--text); }
+  input[type="date"] { color-scheme: dark; }
+  #bills-dir { padding:8px 10px; border-radius:6px; border:1px solid #333; background:var(--panel); color:var(--muted); min-width:220px; }
+  #bills-browse { white-space:nowrap; }
+  #bills-result { margin-top:20px; max-width:700px; }
+  .total { font-size:28px; font-weight:600; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+  td, th { text-align:left; padding:6px 4px; border-bottom:1px solid #262a33; }
+  .muted { color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="tab active" data-view="chat">Chat</div>
+  <div class="tab" data-view="bills">Bills</div>
+</header>
+
+<section id="chat" class="view active">
+  <div id="messages"></div>
+  <form id="chat-form">
+    <input id="chat-input" placeholder="Message the agent…" autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>
+</section>
+
+<section id="bills" class="view">
+  <div class="bills-form">
+    <div class="field">
+      <label>Folder</label>
+      <button id="bills-browse" type="button">📁 Choose folder…</button>
+    </div>
+    <div class="field" style="flex-grow:1;">
+      <label>Selected</label>
+      <input id="bills-dir" readonly placeholder="No folder selected" />
+    </div>
+    <div class="field">
+      <label>Start date (optional)</label>
+      <input id="bills-start" type="date" />
+    </div>
+    <div class="field">
+      <label>End date</label>
+      <input id="bills-end" type="date" />
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="bills-submit">Calculate</button>
+    </div>
+  </div>
+  <div id="bills-result"></div>
+</section>
+
+<script>
+const sessionId = "default";
+
+// ---------- Chat ----------
+const messagesEl = document.getElementById("messages");
+const form = document.getElementById("chat-form");
+const input = document.getElementById("chat-input");
+
+function addBubble(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+async function loadHistory() {
+  const res = await fetch(`/api/history/${sessionId}`);
+  const history = await res.json();
+  history.forEach(m => { if (m.role !== "system") addBubble(m.role, m.content); });
+}
+loadHistory();
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  addBubble("user", text);
+  input.value = "";
+
+  const assistantBubble = addBubble("assistant", "");
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, message: text }),
+  });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    assistantBubble.textContent += decoder.decode(value, { stream: true });
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+});
+
+// ---------- Bills ----------
+
+// default end date = today
+document.getElementById("bills-end").valueAsDate = new Date();
+
+document.getElementById("bills-browse").addEventListener("click", async () => {
+  const dirField = document.getElementById("bills-dir");
+  try {
+    const res = await fetch("/api/pick-folder", { method: "POST" });
+    if (!res.ok) return; // user cancelled — leave previous selection as is
+    const data = await res.json();
+    dirField.value = data.path;
+  } catch (err) {
+    console.error(err);
+  }
+});
+
+document.getElementById("bills-submit").addEventListener("click", async () => {
+  const directory = document.getElementById("bills-dir").value.trim();
+  const start_date = document.getElementById("bills-start").value || null;
+  const end_date = document.getElementById("bills-end").value || null;
+  const resultEl = document.getElementById("bills-result");
+  resultEl.innerHTML = "<p class='muted'>Calculating…</p>";
+
+  try {
+    const res = await fetch("/api/bills/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ directory, start_date, end_date }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      resultEl.innerHTML = `<p style="color:#ff6b6b">${err.detail}</p>`;
+      return;
+    }
+    const data = await res.json();
+    let html = `<div class="total">Total: ₹${data.total.toFixed(2)}</div>`;
+    if (data.photo_bills.length) {
+      html += `<p class="muted">${data.photo_bills.length} photo bill(s) in range not yet totalled (OCR not wired up) — see below.</p>`;
+    }
+    html += `<table><tr><th>Time</th><th>Amount</th><th>Message</th></tr>`;
+    data.text_entries.forEach(e => {
+      html += `<tr><td>${e.timestamp.replace("T"," ")}</td><td>₹${e.amount}</td><td>${e.message}</td></tr>`;
+    });
+    html += `</table>`;
+    if (data.photo_bills.length) {
+      html += `<h4>Photo bills (not totalled)</h4><table><tr><th>Time</th><th>Filename</th></tr>`;
+      data.photo_bills.forEach(p => {
+        html += `<tr><td>${p.timestamp.replace("T"," ")}</td><td>${p.filename}</td></tr>`;
+      });
+      html += `</table>`;
+    }
+    resultEl.innerHTML = html;
+  } catch (err) {
+    resultEl.innerHTML = `<p style="color:#ff6b6b">${err}</p>`;
+  }
+});
+
+// ---------- Tabs ----------
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById(tab.dataset.view).classList.add("active");
+  });
+});
+</script>
+</body>
+</html>
