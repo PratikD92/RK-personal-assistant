@@ -15,6 +15,12 @@ class Settings(BaseSettings):
         "You are a helpful personal AI agent running locally on the user's MacBook. "
         "Be concise and direct."
     )
+    bill_vision_prompt: str = (
+        "This image is a photo of a shopping/purchase bill or receipt. "
+        "Reply with ONLY the final total amount as a plain number, no currency "
+        "symbol, no words, no commas. If you cannot find a clear total, reply "
+        "with exactly: NONE"
+    )
 
     # --- Memory ---
     db_path: str = "./data/agent_memory.db"

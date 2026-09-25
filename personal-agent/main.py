@@ -16,6 +16,7 @@ app = FastAPI(title="Personal Agent")
 
 # ---------- Chat (Phase 1) ----------
 
+
 class ChatRequest(BaseModel):
     session_id: str = "default"
     message: str
@@ -55,24 +56,32 @@ def reset_memory(session_id: str):
 
 # ---------- Bills (Phase 2) ----------
 
+
 class BillRequest(BaseModel):
     directory: str
     start_date: str | None = None  # "YYYY-MM-DD"
     end_date: str | None = None
     sender: str | None = None
+    read_photos: bool = False
 
 
 @app.post("/api/bills/summarize")
 def bills_summarize(req: BillRequest):
     try:
-        result = summarize(req.directory, req.start_date, req.end_date, req.sender)
+        result = summarize(
+            req.directory, req.start_date, req.end_date, req.sender, req.read_photos
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     return {
         "total": result.total,
         "text_entries": [
-            {"timestamp": e.timestamp.isoformat(), "amount": e.amount, "message": e.raw_message}
+            {
+                "timestamp": e.timestamp.isoformat(),
+                "amount": e.amount,
+                "message": e.raw_message,
+            }
             for e in result.text_entries
         ],
         "photo_bills": result.photo_bills,
