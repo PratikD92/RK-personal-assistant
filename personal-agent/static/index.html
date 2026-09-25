@@ -34,7 +34,7 @@
   .spinner-dots span:nth-child(3) { animation-delay:0.3s; }
   @keyframes pulse { 0%,80%,100% { opacity:0.25; transform:scale(0.8);} 40% { opacity:1; transform:scale(1);} }
 
-  /* bills — wraps onto a second line on narrow windows instead of scrolling */
+  /* bills */
   .bills-form { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
   .field { display:flex; flex-direction:column; gap:4px; }
   .field label { font-size:12px; color:var(--muted); }
@@ -42,6 +42,7 @@
   input[type="date"] { color-scheme: dark; }
   #bills-dir { padding:8px 10px; border-radius:6px; border:1px solid #333; background:var(--panel); color:var(--muted); min-width:200px; }
   #bills-sender { min-width:100px; }
+  #bills-offset { width:90px; }
   #bills-browse { white-space:nowrap; }
   .bills-options { display:flex; align-items:center; gap:6px; margin-top:12px; }
   .bills-options label { font-size:13px; color:var(--muted); cursor:pointer; }
@@ -50,6 +51,18 @@
   table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
   td, th { text-align:left; padding:6px 4px; border-bottom:1px solid #262a33; }
   .muted { color:var(--muted); }
+  .ignored-section { margin-top:28px; }
+  .ignored-section h4 { margin-bottom:4px; }
+  .ignored-section .hint { font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .ignored-include-btn { margin-top:10px; background:var(--panel); border:1px solid #333; }
+
+  /* entries page */
+  .entries-form { display:flex; gap:10px; flex-wrap:wrap; align-items:end; max-width:700px; }
+  #entries-total { width:120px; }
+  .entries-table-wrap { max-width:700px; margin-top:24px; }
+  .entries-table-wrap td.amount, .entries-table-wrap th.amount { text-align:right; }
+  .del-btn { background:transparent; border:1px solid #333; color:#ff8f8a; padding:4px 10px; font-size:12px; }
+  tfoot td { font-weight:600; border-top:2px solid #333; border-bottom:none; }
 </style>
 </head>
 <body>
@@ -57,6 +70,7 @@
 <header>
   <div class="tab active" data-view="chat">Chat</div>
   <div class="tab" data-view="bills">Bills</div>
+  <div class="tab" data-view="entries">Entries</div>
 </header>
 
 <section id="chat" class="view active">
@@ -94,6 +108,10 @@
       <input id="bills-end" type="date" />
     </div>
     <div class="field">
+      <label>Offset</label>
+      <input id="bills-offset" type="number" step="any" value="0" />
+    </div>
+    <div class="field">
       <label>&nbsp;</label>
       <button id="bills-submit">Calculate</button>
     </div>
@@ -103,6 +121,40 @@
     <label for="bills-read-photos">🔍 Read photo bills with AI (slower — one model call per image)</label>
   </div>
   <div id="bills-result"></div>
+</section>
+
+<section id="entries" class="view">
+  <div class="entries-form">
+    <div class="field">
+      <label>Start date</label>
+      <input id="entries-start" type="date" />
+    </div>
+    <div class="field">
+      <label>End date</label>
+      <input id="entries-end" type="date" />
+    </div>
+    <div class="field">
+      <label>Total amount</label>
+      <input id="entries-total" type="number" step="any" placeholder="0" />
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="entries-save">Save</button>
+    </div>
+  </div>
+  <div id="entries-error" style="color:#ff6b6b; margin-top:8px;"></div>
+
+  <div class="entries-table-wrap">
+    <table>
+      <thead>
+        <tr><th>Start date</th><th>End date</th><th class="amount">Total amount</th><th></th></tr>
+      </thead>
+      <tbody id="entries-tbody"></tbody>
+      <tfoot>
+        <tr><td colspan="2">Grand total</td><td class="amount" id="entries-grand-total">₹0.00</td><td></td></tr>
+      </tfoot>
+    </table>
+  </div>
 </section>
 
 <script>
@@ -193,47 +245,165 @@ document.getElementById("bills-browse").addEventListener("click", async () => {
   }
 });
 
+// Holds the current calculation's state client-side so "Include" can move
+// rows between lists and recompute the total without another server call.
+let billsState = null; // { total, offset, entries: [...], ignored: [...] }
+
+function renderBillResult() {
+  const resultEl = document.getElementById("bills-result");
+  const { total, offset, entries, ignored } = billsState;
+
+  let html = `<div class="total">Total: ₹${total.toFixed(2)}</div>`;
+  if (offset) html += `<p class="muted">Includes offset of ₹${offset}</p>`;
+  html += `<table><tr><th>Time</th><th>Type</th><th>Amount</th><th>Details</th></tr>`;
+  entries.forEach(e => {
+    const amt = e.amount === null ? '<span class="muted">not read</span>' : `₹${e.amount}`;
+    html += `<tr><td>${e.timestamp.replace("T"," ")}</td><td>${e.type}</td><td>${amt}</td><td>${e.detail}</td></tr>`;
+  });
+  html += `</table>`;
+
+  html += `<div class="ignored-section"><h4>Ignored (${ignored.length})</h4>`;
+  if (ignored.length) {
+    html += `<div class="hint">Marked "pending" and excluded from the total. Check any you want counted, then hit Include.</div>`;
+    html += `<table><tr><th></th><th>Time</th><th>Would-be amount</th><th>Message</th></tr>`;
+    ignored.forEach((e, i) => {
+      html += `<tr><td><input type="checkbox" class="ignored-check" data-idx="${i}" /></td><td>${e.timestamp.replace("T"," ")}</td><td>₹${e.amount}</td><td>${e.detail}</td></tr>`;
+    });
+    html += `</table><button class="ignored-include-btn" id="ignored-include-btn" type="button">Include selected</button>`;
+  } else {
+    html += `<p class="muted">None.</p>`;
+  }
+  html += `</div>`;
+
+  resultEl.innerHTML = html;
+
+  const includeBtn = document.getElementById("ignored-include-btn");
+  if (includeBtn) {
+    includeBtn.addEventListener("click", () => {
+      const checked = Array.from(document.querySelectorAll(".ignored-check:checked"))
+        .map(cb => parseInt(cb.dataset.idx, 10));
+      if (!checked.length) return;
+
+      // move selected ignored rows into entries (as "message" type), add their amounts to total
+      const toMove = checked.map(i => billsState.ignored[i]);
+      toMove.forEach(e => {
+        billsState.entries.push({ timestamp: e.timestamp, type: "message", amount: e.amount, detail: e.detail });
+        billsState.total += e.amount;
+      });
+      billsState.entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      billsState.ignored = billsState.ignored.filter((_, i) => !checked.includes(i));
+
+      renderBillResult();
+    });
+  }
+}
+
 document.getElementById("bills-submit").addEventListener("click", async () => {
   const directory = document.getElementById("bills-dir").value.trim();
   const sender = document.getElementById("bills-sender").value.trim();
   const start_date = document.getElementById("bills-start").value || null;
   const end_date = document.getElementById("bills-end").value || null;
   const read_photos = document.getElementById("bills-read-photos").checked;
+  const offset = parseFloat(document.getElementById("bills-offset").value) || 0;
   const resultEl = document.getElementById("bills-result");
-  resultEl.innerHTML = read_photos
-    ? "<p class='muted'>Calculating… reading photo bills with AI, this can take a while.</p>"
-    : "<p class='muted'>Calculating…</p>";
+  resultEl.innerHTML = "<p class='muted'>Calculating…</p>";
+  billsState = null;
 
   try {
     const res = await fetch("/api/bills/summarize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ directory, sender, start_date, end_date, read_photos }),
+      body: JSON.stringify({ directory, sender, start_date, end_date, read_photos, offset }),
     });
     if (!res.ok) {
       const err = await res.json();
       resultEl.innerHTML = `<p style="color:#ff6b6b">${err.detail}</p>`;
       return;
     }
-    const data = await res.json();
-    let html = `<div class="total">Total: ₹${data.total.toFixed(2)}</div>`;
-    html += `<table><tr><th>Time</th><th>Amount</th><th>Message</th></tr>`;
-    data.text_entries.forEach(e => {
-      html += `<tr><td>${e.timestamp.replace("T"," ")}</td><td>₹${e.amount}</td><td>${e.message}</td></tr>`;
-    });
-    html += `</table>`;
-    if (data.photo_bills.length) {
-      html += `<h4>Photo bills</h4><table><tr><th>Time</th><th>Filename</th><th>Amount</th></tr>`;
-      data.photo_bills.forEach(p => {
-        const amt = p.amount === null ? '<span class="muted">not read</span>' : `₹${p.amount}`;
-        html += `<tr><td>${p.timestamp.replace("T"," ")}</td><td>${p.filename}</td><td>${amt}</td></tr>`;
-      });
-      html += `</table>`;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let errored = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const evt = JSON.parse(line);
+        if (evt.type === "progress") {
+          resultEl.innerHTML = `<p class="muted">Reading photo bills… ${evt.current}/${evt.total}</p>`;
+        } else if (evt.type === "error") {
+          resultEl.innerHTML = `<p style="color:#ff6b6b">${evt.detail}</p>`;
+          errored = true;
+        } else if (evt.type === "result") {
+          billsState = evt;
+        }
+      }
     }
-    resultEl.innerHTML = html;
+
+    if (!errored && billsState) renderBillResult();
   } catch (err) {
     resultEl.innerHTML = `<p style="color:#ff6b6b">${err}</p>`;
   }
+});
+
+// ---------- Entries ----------
+
+async function loadEntries() {
+  const res = await fetch("/api/entries");
+  const entries = await res.json();
+  const tbody = document.getElementById("entries-tbody");
+  tbody.innerHTML = "";
+  let grandTotal = 0;
+  entries.forEach(e => {
+    grandTotal += e.total_amount;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${e.start_date}</td>
+      <td>${e.end_date}</td>
+      <td class="amount">₹${e.total_amount.toFixed(2)}</td>
+      <td><button class="del-btn" data-id="${e.id}">Delete</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+  document.getElementById("entries-grand-total").textContent = `₹${grandTotal.toFixed(2)}`;
+
+  tbody.querySelectorAll(".del-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      await fetch(`/api/entries/${btn.dataset.id}`, { method: "DELETE" });
+      loadEntries();
+    });
+  });
+}
+loadEntries();
+
+document.getElementById("entries-save").addEventListener("click", async () => {
+  const start_date = document.getElementById("entries-start").value;
+  const end_date = document.getElementById("entries-end").value;
+  const total_amount = parseFloat(document.getElementById("entries-total").value);
+  const errEl = document.getElementById("entries-error");
+  errEl.textContent = "";
+
+  if (!start_date || !end_date || isNaN(total_amount)) {
+    errEl.textContent = "Please fill in start date, end date, and total amount.";
+    return;
+  }
+
+  await fetch("/api/entries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ start_date, end_date, total_amount }),
+  });
+
+  document.getElementById("entries-start").value = "";
+  document.getElementById("entries-end").value = "";
+  document.getElementById("entries-total").value = "";
+  loadEntries();
 });
 
 // ---------- Tabs ----------

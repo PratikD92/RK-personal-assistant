@@ -1,5 +1,5 @@
+import json
 import subprocess
-from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import memory
 from config import settings
 from ollama_client import stream_chat
-from phase2.whatsapp_bills import summarize
+from phase2.whatsapp_bills import summarize_stream
 
 app = FastAPI(title="Personal Agent")
 
@@ -59,34 +59,30 @@ def reset_memory(session_id: str):
 
 class BillRequest(BaseModel):
     directory: str
-    start_date: str | None = None  # "YYYY-MM-DD"
+    start_date: str | None = None
     end_date: str | None = None
     sender: str | None = None
     read_photos: bool = False
+    offset: float = 0.0
 
 
 @app.post("/api/bills/summarize")
 def bills_summarize(req: BillRequest):
-    try:
-        result = summarize(
-            req.directory, req.start_date, req.end_date, req.sender, req.read_photos
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    def event_stream():
+        try:
+            for event in summarize_stream(
+                req.directory,
+                req.start_date,
+                req.end_date,
+                req.sender,
+                req.read_photos,
+                req.offset,
+            ):
+                yield json.dumps(event) + "\n"
+        except FileNotFoundError as e:
+            yield json.dumps({"type": "error", "detail": str(e)}) + "\n"
 
-    return {
-        "total": result.total,
-        "text_entries": [
-            {
-                "timestamp": e.timestamp.isoformat(),
-                "amount": e.amount,
-                "message": e.raw_message,
-            }
-            for e in result.text_entries
-        ],
-        "photo_bills": result.photo_bills,
-        "unparsed_lines": result.unparsed_lines,
-    }
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @app.post("/api/pick-folder")
@@ -102,9 +98,34 @@ def pick_folder():
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=408, detail="Folder picker timed out")
     if result.returncode != 0:
-        # non-zero usually means the user hit Cancel
         raise HTTPException(status_code=400, detail="No folder selected")
     return {"path": result.stdout.strip()}
+
+
+# ---------- Manual entries page ----------
+
+
+class EntryRequest(BaseModel):
+    start_date: str  # "YYYY-MM-DD"
+    end_date: str  # "YYYY-MM-DD"
+    total_amount: float
+
+
+@app.post("/api/entries")
+def create_entry(req: EntryRequest):
+    entry_id = memory.add_entry(req.start_date, req.end_date, req.total_amount)
+    return {"id": entry_id}
+
+
+@app.get("/api/entries")
+def get_entries():
+    return memory.list_entries()
+
+
+@app.delete("/api/entries/{entry_id}")
+def remove_entry(entry_id: int):
+    memory.delete_entry(entry_id)
+    return {"status": "deleted"}
 
 
 # ---------- Static frontend ----------

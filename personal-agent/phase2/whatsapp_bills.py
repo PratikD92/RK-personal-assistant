@@ -6,24 +6,36 @@ Expects, inside the given directory:
   - image files whose name ENDS with a timestamp like 2026-05-18-10-21-53
     (these are "photo bills" — optionally read via the multimodal model)
 
-Handles multi-line WhatsApp messages, e.g.:
-  [24/09/26, 09:46:50] X: +130 rs Vegetables
-  +39 rs milk
-This is treated as ONE message with two bill lines -> two entries, same timestamp.
+Handles multi-line WhatsApp messages (a bill description that continues on
+the next line with no [date, time] header) — each sub-line is scanned for
+its own amount.
 
-Only messages from a given sender are counted (case-insensitive, trimmed match
-against the sender name as it appears in _chat.txt before the colon).
+A line starting with "-" (e.g. "-70 rs return seviyan") is a refund/return
+and SUBTRACTS from the total. A line containing the word "pending"
+(case-insensitive) is excluded from the total by default, but its amount is
+still extracted and returned separately under "ignored" — the frontend lets
+you review these and manually include specific ones later.
+
+Only messages from a given sender are counted for text bills (case-insensitive,
+trimmed match against the sender name as it appears in _chat.txt before the colon).
+Ignored/pending detection applies only to text messages, not photo bills.
+
+summarize_stream() is a generator: it yields progress events while photo
+bills are being read by the model (one model call per photo is slow), then a
+single final "result" event containing the combined, time-sorted list of
+message + photo bills, the ignored ("pending") message candidates, and the
+grand total (including the manual offset).
 
 Date format in _chat.txt is assumed DD/MM/YY (standard WhatsApp India export).
 """
+
 import re
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
 from ollama_client import extract_bill_amount
 
-# --- tune these if your export differs ---
 DATE_FMT = "%d/%m/%y %H:%M:%S"
 LINE_RE = re.compile(r"^\[(\d{2}/\d{2}/\d{2}), (\d{2}:\d{2}:\d{2})\] ([^:]+): (.*)$")
 IMAGE_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.\w+$")
@@ -31,34 +43,29 @@ IMAGE_TS_FMT = "%Y-%m-%d-%H-%M-%S"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
 AMOUNT_RE = re.compile(
-    r"(?:^\+\s*|(?<!\d))(?:rs\.?|₹|inr)?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:rs\.?|₹|inr)?",
+    r"(?:^[+-]\s*|(?<!\d))(?:rs\.?|₹|inr)?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:rs\.?|₹|inr)?",
     re.IGNORECASE,
 )
 
 
-@dataclass
-class BillEntry:
-    timestamp: datetime
-    amount: float
-    raw_message: str
-
-
-@dataclass
-class BillSummary:
-    total: float
-    text_entries: list[BillEntry] = field(default_factory=list)
-    photo_bills: list[dict] = field(default_factory=list)  # filename, timestamp, amount(None if unread)
-    unparsed_lines: int = 0
-
-
-def _extract_amount(line: str) -> float | None:
+def _extract_amount(line: str, ignore_pending: bool = False) -> float | None:
+    """Returns the signed amount for a bill-like line, or None if it doesn't
+    look like a bill line at all. If ignore_pending=False (default), a line
+    containing "pending" returns None even if it otherwise looks like a bill
+    — set ignore_pending=True to force extraction anyway (used to compute
+    the "would-be" amount for the Ignored list)."""
     stripped = line.strip()
-    if not re.match(r"^(\+|rs\.?|₹|inr)\b", stripped, re.IGNORECASE):
+    if not ignore_pending and "pending" in stripped.lower():
+        return None
+    if not re.match(r"^([+-]|rs\.?|₹|inr)\b", stripped, re.IGNORECASE):
         return None
     m = AMOUNT_RE.search(stripped)
     if not m:
         return None
-    return float(m.group(1).replace(",", ""))
+    amount = float(m.group(1).replace(",", ""))
+    if stripped.startswith("-"):
+        amount = -amount
+    return amount
 
 
 def _in_range(ts: datetime, start: datetime | None, end: datetime | None) -> bool:
@@ -103,13 +110,14 @@ def _read_messages(chat_file: Path) -> list[tuple[datetime, str, str]]:
     return messages
 
 
-def summarize(
+def summarize_stream(
     directory: str,
     start_date: str | None = None,
     end_date: str | None = None,
     sender: str | None = None,
     read_photos: bool = False,
-) -> BillSummary:
+    offset: float = 0.0,
+) -> Iterator[dict]:
     dir_path = Path(directory).expanduser()
     if not dir_path.is_dir():
         raise FileNotFoundError(f"Directory not found: {dir_path}")
@@ -126,7 +134,9 @@ def summarize(
     )
     sender_filter = sender.strip().lower() if sender and sender.strip() else None
 
-    summary = BillSummary(total=0.0)
+    entries: list[dict] = []
+    ignored: list[dict] = []
+    total = float(offset)
 
     for ts, msg_sender, message in _read_messages(chat_file):
         if not _in_range(ts, start, end):
@@ -136,10 +146,28 @@ def summarize(
         for sub_line in message.split("\n"):
             amount = _extract_amount(sub_line)
             if amount is not None:
-                summary.text_entries.append(BillEntry(ts, amount, sub_line.strip()))
-                summary.total += amount
+                entries.append(
+                    {
+                        "timestamp": ts,
+                        "type": "message",
+                        "amount": amount,
+                        "detail": sub_line.strip(),
+                    }
+                )
+                total += amount
+            else:
+                forced = _extract_amount(sub_line, ignore_pending=True)
+                if forced is not None:
+                    # was skipped only because of "pending" — candidate for manual include
+                    ignored.append(
+                        {
+                            "timestamp": ts.isoformat(),
+                            "amount": forced,
+                            "detail": sub_line.strip(),
+                        }
+                    )
 
-    # Photo bills — sender filtering not applied here yet (see note in README)
+    photo_files: list[tuple[datetime, Path]] = []
     for img in dir_path.iterdir():
         if img.suffix.lower() not in IMAGE_EXTS:
             continue
@@ -150,15 +178,33 @@ def summarize(
             ts = datetime.strptime(m.group(1), IMAGE_TS_FMT)
         except ValueError:
             continue
-        if not _in_range(ts, start, end):
-            continue
+        if _in_range(ts, start, end):
+            photo_files.append((ts, img))
 
-        entry = {"filename": img.name, "timestamp": ts.isoformat(), "amount": None}
+    photo_count = len(photo_files)
+    for idx, (ts, img) in enumerate(photo_files, start=1):
+        amount = None
         if read_photos:
+            yield {"type": "progress", "current": idx, "total": photo_count}
             amount = extract_bill_amount(str(img))
-            entry["amount"] = amount
             if amount is not None:
-                summary.total += amount
-        summary.photo_bills.append(entry)
+                total += amount
+        entries.append(
+            {
+                "timestamp": ts,
+                "type": "photo",
+                "amount": amount,
+                "detail": img.name,
+            }
+        )
 
-    return summary
+    entries.sort(key=lambda e: e["timestamp"])
+    ignored.sort(key=lambda e: e["timestamp"])
+
+    yield {
+        "type": "result",
+        "total": total,
+        "offset": offset,
+        "entries": [{**e, "timestamp": e["timestamp"].isoformat()} for e in entries],
+        "ignored": ignored,
+    }

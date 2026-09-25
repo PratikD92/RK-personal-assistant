@@ -1,7 +1,8 @@
 """
-Simple SQLite memory. No extra services to run, no extra deps.
-Stores every message per session so the agent has real conversation history.
+Simple SQLite storage: chat memory + manual bill-period entries.
+No extra services to run, no extra deps.
 """
+
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -38,6 +39,17 @@ def init_db():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_session ON messages(session_id, id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manual_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_date TEXT NOT NULL,    -- "YYYY-MM-DD"
+                end_date TEXT NOT NULL,      -- "YYYY-MM-DD"
+                total_amount REAL NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
 
 
@@ -78,6 +90,33 @@ def clear_session(session_id: str) -> None:
     """Deletes all stored messages for a session — used by 'Reset Memory'."""
     with get_conn() as conn:
         conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+
+
+def add_entry(start_date: str, end_date: str, total_amount: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO manual_entries (start_date, end_date, total_amount, created_at) VALUES (?, ?, ?, ?)",
+            (
+                start_date,
+                end_date,
+                total_amount,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return cur.lastrowid
+
+
+def list_entries() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, start_date, end_date, total_amount FROM manual_entries ORDER BY start_date"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_entry(entry_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM manual_entries WHERE id = ?", (entry_id,))
 
 
 init_db()
