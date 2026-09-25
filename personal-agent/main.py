@@ -47,18 +47,25 @@ def get_sessions():
     return memory.list_sessions()
 
 
+@app.delete("/api/memory/{session_id}")
+def reset_memory(session_id: str):
+    memory.clear_session(session_id)
+    return {"status": "cleared", "session_id": session_id}
+
+
 # ---------- Bills (Phase 2) ----------
 
 class BillRequest(BaseModel):
     directory: str
     start_date: str | None = None  # "YYYY-MM-DD"
     end_date: str | None = None
+    sender: str | None = None
 
 
 @app.post("/api/bills/summarize")
 def bills_summarize(req: BillRequest):
     try:
-        result = summarize(req.directory, req.start_date, req.end_date)
+        result = summarize(req.directory, req.start_date, req.end_date, req.sender)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

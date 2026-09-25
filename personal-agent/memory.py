@@ -74,4 +74,10 @@ def list_sessions() -> list[str]:
     return [r["session_id"] for r in rows]
 
 
+def clear_session(session_id: str) -> None:
+    """Deletes all stored messages for a session — used by 'Reset Memory'."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+
+
 init_db()

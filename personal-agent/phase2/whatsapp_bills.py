@@ -12,6 +12,9 @@ Handles multi-line WhatsApp messages, e.g.:
   +39 rs milk
 This is treated as ONE message with two bill lines -> two entries, same timestamp.
 
+Only messages from a given sender are counted (case-insensitive, trimmed match
+against the sender name as it appears in _chat.txt before the colon).
+
 Date format in _chat.txt is assumed DD/MM/YY (standard WhatsApp India export).
 Adjust DATE_FMT below if your export uses a different format (check one line
 of your real _chat.txt to confirm).
@@ -70,19 +73,20 @@ def _in_range(ts: datetime, start: datetime | None, end: datetime | None) -> boo
     return True
 
 
-def _read_messages(chat_file: Path) -> list[tuple[datetime, str]]:
+def _read_messages(chat_file: Path) -> list[tuple[datetime, str, str]]:
     """Groups continuation lines into their parent message. WhatsApp exports
     give no marker for line 2+ of a multi-line message, so any line that
     doesn't match the `[date, time] sender:` header is treated as a
     continuation of the message currently being built.
-    Returns list of (timestamp, full_message_text)."""
-    messages: list[tuple[datetime, str]] = []
+    Returns list of (timestamp, sender, full_message_text)."""
+    messages: list[tuple[datetime, str, str]] = []
     current_ts: datetime | None = None
+    current_sender: str = ""
     current_lines: list[str] = []
 
     def flush():
         if current_ts is not None and current_lines:
-            messages.append((current_ts, "\n".join(current_lines)))
+            messages.append((current_ts, current_sender, "\n".join(current_lines)))
 
     with open(chat_file, "r", encoding="utf-8", errors="ignore") as f:
         for raw_line in f:
@@ -90,9 +94,10 @@ def _read_messages(chat_file: Path) -> list[tuple[datetime, str]]:
             m = LINE_RE.match(line)
             if m:
                 flush()
-                date_str, time_str, _sender, message = m.groups()
+                date_str, time_str, sender, message = m.groups()
                 try:
                     current_ts = datetime.strptime(f"{date_str} {time_str}", DATE_FMT)
+                    current_sender = sender.strip()
                     current_lines = [message]
                 except ValueError:
                     current_ts = None
@@ -109,6 +114,7 @@ def summarize(
     directory: str,
     start_date: str | None = None,  # "YYYY-MM-DD"
     end_date: str | None = None,    # "YYYY-MM-DD", inclusive
+    sender: str | None = None,      # only count messages from this sender; None/"" = everyone
 ) -> BillSummary:
     dir_path = Path(directory).expanduser()
     if not dir_path.is_dir():
@@ -124,12 +130,15 @@ def summarize(
         if end_date
         else None
     )
+    sender_filter = sender.strip().lower() if sender and sender.strip() else None
 
     summary = BillSummary(total=0.0)
 
-    # --- parse text messages (multi-line aware) ---
-    for ts, message in _read_messages(chat_file):
+    # --- parse text messages (multi-line + sender aware) ---
+    for ts, msg_sender, message in _read_messages(chat_file):
         if not _in_range(ts, start, end):
+            continue
+        if sender_filter is not None and msg_sender.strip().lower() != sender_filter:
             continue
         for sub_line in message.split("\n"):
             amount = _extract_amount(sub_line)
@@ -138,6 +147,10 @@ def summarize(
                 summary.total += amount
 
     # --- find photo bills in range (amounts not extracted — flagged for OCR later) ---
+    # Note: photo attachments in _chat.txt appear as a line like
+    # "[date, time] sender: <attached: FILE.jpg>", so sender filtering for
+    # photos isn't wired yet — all photo bills in the date range are listed
+    # regardless of sender. Flag if you want this filtered too.
     for img in dir_path.iterdir():
         if img.suffix.lower() not in IMAGE_EXTS:
             continue
